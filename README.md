@@ -1,2 +1,2 @@
-# WhatIsDiddyBludDoin
-what is diddyblud doin on the calculator? is blud einstein?
+# QVAE-MLX
+Hybrid quantum-classical convolutional variational autoencoder for drug molecule generation, written in MLX for fast and efficient training on Apple Silicon. 
