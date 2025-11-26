@@ -47,3 +47,8 @@ ENV/
 # *.pt
 # *.pth
 
+# Pickle files
+*.pkl
+*.pickle
+data/*.pkl
+
