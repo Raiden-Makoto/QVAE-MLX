@@ -191,41 +191,44 @@ def PauliZ(wire: int, device: MLXQuantumDevice = None) -> mx.array:
 
 
 def CNOT(control: int, target: int, device: MLXQuantumDevice = None) -> mx.array:
-    """Apply CNOT gate (control on 'control', target on 'target')."""
+    """Apply CNOT gate (control on 'control', target on 'target') directly on the state.
+
+    This implementation avoids constructing a full 2^n x 2^n matrix, which is
+    expensive in memory and can hit Metal resource limits for repeated calls.
+    Instead, it permutes amplitudes in the state vector in-place.
+    """
     if device is None:
         device = _default_device
     if device is None:
         raise RuntimeError("No device specified.")
-    
-    # CNOT matrix in computational basis (2-qubit)
-    cnot_2q = mx.array([
-        [1.0, 0.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0],
-        [0.0, 0.0, 1.0, 0.0]
-    ], dtype=mx.complex64)
-    
-    if device.wires == 2:
-        op = cnot_2q
-    else:
-        # For multi-qubit, construct CNOT matrix directly
-        # CNOT flips target qubit when control is |1⟩
-        dim = 2 ** device.wires
-        op = mx.zeros((dim, dim), dtype=mx.complex64)
-        
-        for i in range(dim):
-            control_val = (i >> (device.wires - control - 1)) & 1
-            
-            if control_val == 0:
-                # Control is 0: target unchanged
-                op[i, i] = 1.0
-            else:
-                # Control is 1: flip target qubit
-                j = i ^ (1 << (device.wires - target - 1))
-                op[i, j] = 1.0
-    
-    device.apply_operation(op)
-    return op
+
+    state_arr = device.get_state()
+    # Work on CPU using NumPy to avoid fancy MLX indexing issues.
+    # This is cheap for dim <= 2^9 and avoids large matrix allocations.
+    import numpy as _np
+    state_np = _np.array(state_arr)
+    dim = state_np.shape[0]
+
+    # New state after applying CNOT
+    new_state_np = _np.zeros_like(state_np)
+
+    # Bit positions for control and target (0 = most significant qubit)
+    ctrl_bit = device.wires - control - 1
+    tgt_bit = device.wires - target - 1
+
+    # Iterate over all basis states
+    # For dim <= 2^9 = 512 this is cheap and avoids large matrix allocations
+    for i in range(dim):
+        control_val = (i >> ctrl_bit) & 1
+        if control_val == 0:
+            j = i
+        else:
+            j = i ^ (1 << tgt_bit)
+        # Move amplitude from |i> to |j>
+        new_state_np[j] = state_np[i]
+
+    device.state = mx.array(new_state_np, dtype=mx.complex64)
+    return device.state
 
 
 def RX(angle, wire: int, device: MLXQuantumDevice = None) -> mx.array:

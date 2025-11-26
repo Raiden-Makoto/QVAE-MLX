@@ -113,7 +113,7 @@ def graph_to_molecule(graph):
         
         for atom_i, atom_j in bond_locations:
             bond_type = bond_mapping[bond_idx]
-            molecule.AddBond(int(atom_i), int(atom_j), bond_type)
+        molecule.AddBond(int(atom_i), int(atom_j), bond_type)
     flag = Chem.SanitizeMol(molecule, catchErrors=True)
     if flag != Chem.SanitizeFlags.SANITIZE_NONE:
         return None
