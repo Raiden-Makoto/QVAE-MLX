@@ -1,6 +1,7 @@
 import mlx.core as mx
 import mlx.nn as nn
 from quantum.layers import SimpleEntangler, EncoderLayer
+from quantum.gates import device
 import numpy as np
 
 
@@ -46,7 +47,7 @@ class QuantumDense(nn.Module):
         Forward pass.
         
         Args:
-            inputs: Input features of shape (batch_size, wires)
+            inputs: Input features of shape (batch_size, 2^wires) for amplitude embedding
         
         Returns:
             Output probabilities of shape (batch_size, 2^wires)
@@ -55,23 +56,50 @@ class QuantumDense(nn.Module):
         if inputs.ndim == 1:
             inputs = inputs[None, :]
         
-        batch_size = inputs.shape[0]
-        max_batch = 20  # Try 20 as requested
+        batch_size, input_dim = inputs.shape
+        if input_dim != self.state_dim:
+            raise ValueError(
+                f"QuantumDense expects input of shape (batch, {self.state_dim}) for amplitude embedding, got last dim {input_dim}"
+            )
         
-        if batch_size <= max_batch:
-            # Small batch - process directly
-            dev = SimpleEntangler(self.wires, weights=self.weights, rotation='Z')
-            encoded_probs = EncoderLayer(self.wires, dev=dev, features=inputs, rotation='Y')
-            return encoded_probs
-        else:
-            # Large batch - process in chunks
-            results = []
-            for i in range(0, batch_size, max_batch):
-                end_idx = min(i + max_batch, batch_size)
-                batch_inputs = inputs[i:end_idx]
-                
-                dev = SimpleEntangler(self.wires, weights=self.weights, rotation='Z')
-                batch_probs = EncoderLayer(self.wires, dev=dev, features=batch_inputs, rotation='Y')
-                results.append(batch_probs)
+        max_batch = 20  # Try 20 as requested
+        results = []
+        
+        for i in range(0, batch_size, max_batch):
+            end_idx = min(i + max_batch, batch_size)
+            batch_inputs = inputs[i:end_idx]  # (sub_batch, state_dim)
             
-            return mx.concatenate(results, axis=0)
+            # Use EncoderLayer to perform amplitude embedding and return complex state
+            states = EncoderLayer(
+                self.wires,
+                dev=None,
+                features=batch_inputs,
+                return_state=True,
+            )  # (sub_batch, state_dim), complex64
+            
+            sub_results = []
+            for b in range(batch_inputs.shape[0]):
+                state_vec = states[b]
+                
+                # Prepare quantum device with embedded state
+                dev = device(self.wires)
+                dev.state = state_vec
+                
+                # Apply SimpleEntangler *after* amplitude embedding without resetting
+                dev = SimpleEntangler(
+                    self.wires,
+                    dev=dev,
+                    weights=self.weights,
+                    rotation='Z',
+                    reset=False,
+                )
+                
+                # Measure probabilities
+                from quantum import state as _state
+                probs = mx.abs(_state(dev)) ** 2  # (state_dim,)
+                sub_results.append(probs)
+            
+            sub_results = mx.stack(sub_results, axis=0)  # (sub_batch, state_dim)
+            results.append(sub_results)
+        
+        return mx.concatenate(results, axis=0)

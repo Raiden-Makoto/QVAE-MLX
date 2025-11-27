@@ -7,11 +7,11 @@ class Encoder(nn.Module):
     def __init__(
         self,
         gconv_units,
-        latent_dim,
         adjacency_shape,
         feature_shape,
         dense_units,
         dropout_rate,
+        latent_dim: int=435,
     ):
         super().__init__()
         bond_dim = adjacency_shape[0]
@@ -29,22 +29,16 @@ class Encoder(nn.Module):
             self.gconv_layers.append(layer)
             input_atom_dim = units  # Next layer's input is this layer's output
         
-        # Pooling: need to pool over num_atoms dimension
-        # GConv output: (batch, num_atoms, last_units)
-        # After transpose: (batch, last_units, num_atoms)
-        # After pooling: (batch, last_units, 1) -> squeeze -> (batch, last_units)
+        # Pooling: we will mean-pool over atoms to get a single feature vector
+        # per graph with size equal to the last GConv units (e.g., 512 = 2^latent_dim).
         self.pool_kernel_size = adjacency_shape[1]
         self.pool = nn.AvgPool1d(kernel_size=self.pool_kernel_size)
-        
-        # Map from last gconv units to latent_dim for quantum dense
-        last_gconv_units = gconv_units[-1] if gconv_units else atom_dim
-        self.pre_q_linear = nn.Linear(last_gconv_units, latent_dim)
         
         self.q_dense = QuantumDense(latent_dim, n_layers=1, initializer="normal")
         
         # Build dense layers
         # QuantumDense outputs (batch, 2^latent_dim)
-        quantum_output_dim = 2 ** latent_dim
+        quantum_output_dim = 2 ** 9
         
         self.dense_layers = []
         input_dim = quantum_output_dim
@@ -93,14 +87,12 @@ class Encoder(nn.Module):
         features_transformed = mx.concatenate(features_transformed_list, axis=0)
         
         # Pool over num_atoms dimension: average over atoms
-        # features_transformed: (batch, num_atoms, units)
-        x = mx.mean(features_transformed, axis=1)  # (batch, units)
+        # features_transformed: (batch, num_atoms, last_gconv_units)
+        # After pooling we have (batch, last_gconv_units), which matches QuantumDense input.
+        x = mx.mean(features_transformed, axis=1)  # (batch, last_gconv_units)
         
-        # Map to latent_dim for quantum dense
-        x = self.pre_q_linear(x)  # (batch, latent_dim)
-        
-        # Quantum dense layer
-        x = self.q_dense(x)  # (batch, 2^latent_dim)
+        # QuantumDense: amplitude embedding + entangling circuit + measurement
+        x = self.q_dense(x)  # (batch, last_gconv_units)
         
         # Regular dense layers
         for layer in self.dense_layers:

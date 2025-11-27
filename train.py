@@ -43,18 +43,18 @@ def load_data(data_dir="data"):
 def create_model(latent_dim, adjacency_shape, feature_shape):
     """Create and initialize VAE model."""
     encoder = Encoder(
-        gconv_units=[64, 128],
+        gconv_units=[512],
         latent_dim=latent_dim,
         adjacency_shape=adjacency_shape,
         feature_shape=feature_shape,
-        dense_units=[256],
-        dropout_rate=0.1
+        dense_units=[512],
+        dropout_rate=0.0
     )
     
     decoder = Decoder(
         latent_dim=latent_dim,
-        dense_units=[256],
-        dropout_rate=0.1,
+        dense_units=[128, 256, 512],
+        dropout_rate=0.2,
         adjacency_shape=adjacency_shape,
         feature_shape=feature_shape
     )
@@ -110,14 +110,17 @@ def train_step(model, optimizer, loss_and_grad_fn, adjacency, features, qed_true
     return loss
 
 
-def validate(model, adjacency, features, qed_true, batch_size=20):
+def validate(model, adjacency, features, qed_true, batch_size=20, num_samples=None):
     """Validate model on a subset of data."""
     model.eval()
     total_loss = 0.0
     num_batches = 0
     
     dataset_size = len(adjacency)
-    num_val_samples = min(500, dataset_size)  # Validate on up to 500 samples
+    if num_samples is None:
+        num_val_samples = min(500, dataset_size)  # Validate on up to 500 samples
+    else:
+        num_val_samples = min(num_samples, dataset_size)
     
     val_range = range(0, num_val_samples, batch_size)
     val_pbar = tqdm(val_range, desc="Validation", position=1, leave=False)
@@ -181,7 +184,14 @@ def train(
     resume_from=None,
     val_interval=5,
     save_interval=10,
-    max_grad_norm=5.0  # Increase from 1.0 to allow larger gradients
+    max_grad_norm=5.0,  # Increase from 1.0 to allow larger gradients
+    early_stopping_patience=10,  # Stop if no improvement for N epochs
+    early_stopping_min_delta=0.001,  # Minimum change to qualify as improvement
+    kl_weight=1.0,
+    adj_weight=0.15,  # Increased from 0.05 to give adjacency more importance
+    feat_weight=1.2,
+    prop_weight=1.2,
+    graph_weight=0.2
 ):
     """Main training loop."""
     print("=" * 70)
@@ -201,6 +211,7 @@ def train(
     print(f"  Total samples: {batch_size_total}")
     print(f"  Adjacency shape: {adjacency_shape}")
     print(f"  Feature shape: {feature_shape}")
+    print(f"\nLoss weights: KL={kl_weight}, Adj={adj_weight}, Feat={feat_weight}, Prop={prop_weight}, Graph={graph_weight}")
     
     # Create model
     print(f"\nCreating model...")
@@ -209,7 +220,8 @@ def train(
     
     # Create optimizer with learning rate scheduling
     # Start with moderate LR increase to avoid NaN
-    initial_lr = learning_rate * 3  # Start 3x higher (reduced from 10x to avoid NaN)
+    # With larger model (512 units), use more conservative LR
+    initial_lr = learning_rate * 2  # Reduced from 3x to 2x for stability with larger model
     # Create scheduler that decays over total training steps (epochs * batches per epoch)
     total_steps = num_epochs * ((batch_size_total + batch_size - 1) // batch_size)
     scheduler = optim.schedulers.cosine_decay(initial_lr, total_steps, end=learning_rate)
@@ -217,14 +229,13 @@ def train(
     print(f"  ✓ Optimizer created (Adam, initial_lr={initial_lr:.6f}, cosine decay to {learning_rate:.6f})")
     
     # Create loss and gradient function with balanced weights
-    # Reduce adjacency weight since it dominates, increase others
     loss_fn = make_loss_fn(
         vae,
-        kl_weight=1.0,
-        adj_weight=0.01,  # Reduce adjacency weight significantly
-        feat_weight=1.0,
-        prop_weight=1.0,
-        graph_weight=0.1
+        kl_weight=kl_weight,
+        adj_weight=adj_weight,
+        feat_weight=feat_weight,
+        prop_weight=prop_weight,
+        graph_weight=graph_weight
     )
     loss_and_grad_fn = nn.value_and_grad(vae, loss_fn)
     
@@ -253,6 +264,11 @@ def train(
     
     # Track memory usage
     memory_samples = []
+    
+    # Early stopping tracking
+    best_val_loss = float('inf')
+    epochs_without_improvement = 0
+    best_epoch = 0
     
     # Outer progress bar for epochs
     epoch_pbar = tqdm(range(start_epoch, num_epochs), desc="Epochs", position=0, leave=True)
@@ -341,6 +357,29 @@ def train(
         if (epoch + 1) % val_interval == 0:
             val_loss = validate(vae, adjacency_tensor, feature_tensor, qed_tensor, batch_size=batch_size)
             epoch_pbar.write(f"  Validation loss: {val_loss:.4f} (lr={current_lr:.6f})")
+            
+            # Early stopping check
+            if val_loss < best_val_loss - early_stopping_min_delta:
+                # Improvement detected
+                best_val_loss = val_loss
+                best_epoch = epoch + 1
+                epochs_without_improvement = 0
+                
+                # Save best model
+                best_checkpoint_path = f"{checkpoint_dir}/checkpoint_best.npz"
+                vae.save_weights(best_checkpoint_path)
+                epoch_pbar.write(f"  ✓ New best validation loss: {best_val_loss:.4f} (saved to {best_checkpoint_path})")
+            else:
+                # No improvement - increment by val_interval since we only check every N epochs
+                epochs_without_improvement += val_interval
+                epoch_pbar.write(f"  No improvement for {epochs_without_improvement} epochs (best: {best_val_loss:.4f} at epoch {best_epoch})")
+                
+                # Check if we should stop
+                if epochs_without_improvement >= early_stopping_patience:
+                    epoch_pbar.write(f"\n  ⚠ Early stopping triggered!")
+                    epoch_pbar.write(f"  Best validation loss: {best_val_loss:.4f} at epoch {best_epoch}")
+                    epoch_pbar.write(f"  Stopping training at epoch {epoch + 1}")
+                    break
         
         # Save checkpoint
         if (epoch + 1) % save_interval == 0:
@@ -350,6 +389,13 @@ def train(
     
     # Save final checkpoint
     print("Training complete!")
+    
+    # Load best model if it exists (from early stopping)
+    best_checkpoint_path = f"{checkpoint_dir}/checkpoint_best.npz"
+    if os.path.exists(best_checkpoint_path) and best_epoch > 0:
+        vae.load_weights(best_checkpoint_path)
+        print(f"  Loaded best model from epoch {best_epoch} (val_loss: {best_val_loss:.4f})")
+    
     save_checkpoint(vae, optimizer, num_epochs, avg_epoch_loss, checkpoint_dir)
     
     # Final memory statistics
@@ -387,6 +433,13 @@ if __name__ == "__main__":
     parser.add_argument("--val_interval", type=int, default=5, help="Validation interval (epochs)")
     parser.add_argument("--save_interval", type=int, default=10, help="Save interval (epochs)")
     parser.add_argument("--max_grad_norm", type=float, default=5.0, help="Maximum gradient norm for clipping")
+    parser.add_argument("--early_stopping_patience", type=int, default=10, help="Early stopping patience (epochs without improvement)")
+    parser.add_argument("--early_stopping_min_delta", type=float, default=0.001, help="Minimum change to qualify as improvement")
+    parser.add_argument("--kl_weight", type=float, default=1.0, help="Weight for KL divergence loss")
+    parser.add_argument("--adj_weight", type=float, default=0.15, help="Weight for adjacency loss")
+    parser.add_argument("--feat_weight", type=float, default=1.2, help="Weight for node feature loss")
+    parser.add_argument("--prop_weight", type=float, default=1.2, help="Weight for property prediction loss")
+    parser.add_argument("--graph_weight", type=float, default=0.2, help="Weight for gradient penalty loss")
     
     args = parser.parse_args()
     
@@ -400,6 +453,13 @@ if __name__ == "__main__":
         resume_from=args.resume_from,
         val_interval=args.val_interval,
         save_interval=args.save_interval,
-        max_grad_norm=args.max_grad_norm
+        max_grad_norm=args.max_grad_norm,
+        early_stopping_patience=args.early_stopping_patience,
+        early_stopping_min_delta=args.early_stopping_min_delta,
+        kl_weight=args.kl_weight,
+        adj_weight=args.adj_weight,
+        feat_weight=args.feat_weight,
+        prop_weight=args.prop_weight,
+        graph_weight=args.graph_weight
     )
 

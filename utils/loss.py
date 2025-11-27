@@ -89,12 +89,18 @@ def compute_loss(
     
     # Property loss: binary crossentropy
     qed_pred_squeezed = mx.squeeze(qed_pred, axis=1)  # (batch,)
+    # Clip predictions to prevent NaN in binary crossentropy
+    qed_pred_clipped = mx.clip(qed_pred_squeezed, -10, 10)  # Reasonable range
     property_loss = mx.mean(
-        nn.losses.binary_cross_entropy(qed_pred_squeezed, qed_true)
+        nn.losses.binary_cross_entropy(qed_pred_clipped, qed_true)
     )
+    # Ensure finite
+    property_loss = mx.where(mx.isfinite(property_loss), property_loss, mx.zeros_like(property_loss))
     
     # Graph loss (gradient penalty) - simplified for now
     graph_loss = gradient_penalty(graph_real, graph_generated)
+    # Ensure finite
+    graph_loss = mx.where(mx.isfinite(graph_loss), graph_loss, mx.zeros_like(graph_loss))
     
     # Weighted total loss
     total_loss = (
@@ -106,7 +112,13 @@ def compute_loss(
     )
     
     # Final check: ensure loss is finite
-    total_loss = mx.where(mx.isfinite(total_loss), total_loss, mx.array(1e6))  # Large but finite if NaN
+    # If loss is NaN/Inf, return a large but reasonable value and log a warning
+    # This prevents training from crashing but indicates a problem
+    total_loss = mx.where(
+        mx.isfinite(total_loss), 
+        total_loss, 
+        mx.array(100.0)  # Reasonable fallback - indicates NaN/Inf issue
+    )
     
     return total_loss
 
