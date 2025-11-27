@@ -1,7 +1,7 @@
 import mlx.core as mx
 import mlx.nn as nn
-from model.dense import QuantumDense
-from model.rgcn import RelationalGraphConvLayer
+from layers.dense import QuantumDense
+from layers.rgcn import RelationalGraphConvLayer
 
 class Encoder(nn.Module):
     def __init__(
