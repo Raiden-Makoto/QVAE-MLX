@@ -198,9 +198,15 @@ def EncoderLayer(
             
             # Apply to all batch samples using batched matrix-vector multiplication
             # (batch_size, 2^wires, 2^wires) @ (batch_size, 2^wires, 1) -> (batch_size, 2^wires, 1)
-            batched_state = mx.squeeze(mx.matmul(full_op, batched_state[:, :, None]), axis=2)
+            # Use stop_gradient on the state to prevent complex64 tracking
+            # Gradients will still flow through rotation matrices (which depend on float32 angles)
+            state_input = mx.stop_gradient(batched_state)
+            batched_state = mx.squeeze(mx.matmul(full_op, state_input[:, :, None]), axis=2)
+            # Wrap result in stop_gradient to prevent tracking, but gradients flow through full_op
+            batched_state = mx.stop_gradient(batched_state)
         
         # Return probabilities (|amplitude|^2) instead of complex state
+        # This converts complex64 to float32, which is what we need for gradients
         return mx.abs(batched_state) ** 2
     
     else:
