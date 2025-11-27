@@ -51,4 +51,7 @@ ENV/
 *.pkl
 *.pickle
 data/*.pkl
+checkpoints/
+checkpoints/**
+*.npz
 
