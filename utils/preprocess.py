@@ -4,6 +4,7 @@ import pandas as pd
 import ast
 import pickle
 import os
+import argparse
 
 from rdkit import Chem, RDLogger
 from rdkit.Chem import BondType
@@ -128,11 +129,22 @@ def graph_to_molecule(graph):
     return molecule
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Preprocess molecular dataset")
+    parser.add_argument("--percent", type=float, default=10.0, 
+                       help="Percentage of dataset to load (default: 10.0)")
+    args = parser.parse_args()
+    
     df = pd.read_csv(csv_path)
     train_df = df.sample(frac=0.75, random_state=67)
     train_df.reset_index(drop=True, inplace=True)
-
-    num_samples = 8000
+    
+    # Calculate number of samples based on percentage
+    total_available = len(train_df)
+    num_samples = int(total_available * (args.percent / 100.0))
+    
+    print(f"Dataset preprocessing:")
+    print(f"  Total available samples: {total_available:,}")
+    print(f"  Loading {args.percent}% of dataset: {num_samples:,} samples")
     
     adjacency_list, feature_list, qed_list = [], [], []
     

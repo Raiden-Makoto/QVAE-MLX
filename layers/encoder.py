@@ -124,4 +124,7 @@ class Encoder(nn.Module):
         
         mu = self.fc_mu(x)
         logvar = self.fc_logvar(x)
+        # Clip logvar to prevent numerical explosion in KL loss
+        # exp(logvar) becomes huge if logvar > 10, causing KL to explode
+        logvar = mx.clip(logvar, -10.0, 10.0)
         return mu, logvar

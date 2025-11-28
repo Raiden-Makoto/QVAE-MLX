@@ -12,8 +12,8 @@ class VAE(nn.Module):
         self.encoder = encoder
         self.decoder = decoder
         self.reparameterize = reparameterize
-        # Property prediction: use mu (latent representation)
-        # mu shape: (batch, latent_dim)
+        # Property prediction: use z (sampled latent) instead of mu for better variance
+        # z shape: (batch, latent_dim)
         # Get latent_dim from encoder's fc_mu layer weight shape (output_dims, input_dims)
         latent_dim = encoder.fc_mu.weight.shape[0]
         self.property = nn.Linear(latent_dim, 1)
@@ -22,7 +22,8 @@ class VAE(nn.Module):
         mu, logvar = self.encoder(inputs)
         z = self.reparameterize(mu, logvar)
         adjacency, features = self.decoder(z)
-        property_logits = self.property(mu)
+        # Use z (sampled latent) instead of mu for property prediction to get more variance
+        property_logits = self.property(z)
         property = nn.sigmoid(property_logits)  # Apply sigmoid to get [0, 1] range
         return mu, logvar, adjacency, features, property
 

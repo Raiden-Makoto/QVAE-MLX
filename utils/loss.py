@@ -96,6 +96,9 @@ def compute_loss(
     # Ensure finite
     kl_loss = mx.where(mx.isfinite(kl_loss), kl_loss, mx.zeros_like(kl_loss))
     
+    # NOTE: Removed minimum KL constraint - it was causing numerical issues
+    # The real fix is to increase KL weight and improve encoder initialization
+    
     # Property loss: binary crossentropy
     # qed_pred is now probabilities [0, 1] after sigmoid in VAE
     qed_pred_squeezed = mx.squeeze(qed_pred, axis=1)  # (batch,)

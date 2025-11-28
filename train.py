@@ -83,6 +83,9 @@ def compute_loss_components(
     kl_loss = mx.mean(kl_loss)
     kl_loss = mx.where(mx.isfinite(kl_loss), kl_loss, mx.zeros_like(kl_loss))
     
+    # NOTE: Removed minimum KL constraint - it was causing numerical issues
+    # The real fix is to increase KL weight and improve encoder initialization
+    
     # Property loss
     qed_pred_squeezed = mx.squeeze(qed_pred, axis=1)
     epsilon = 1e-8
@@ -275,12 +278,12 @@ def train(
     val_interval=5,  # Check validation every 5 epochs
     save_interval=10,
     max_grad_norm=5.0,  # Increase from 1.0 to allow larger gradients
-    early_stopping_patience=30,  # Stop if loss hasn't improved by min_delta over 30 epochs
+    early_stopping_patience=10,  # Stop if loss hasn't improved by min_delta over 50 epochs (increased for larger dataset)
     early_stopping_min_delta=0.0001,  # Loss must improve by 0.0001 (accounts for scaled loss ~5-7)
-    kl_weight=25.0,  # Final KL weight after annealing (will be annealed from 0 to 25)
+    kl_weight=50.0,  # Final KL weight after annealing (will be annealed from 0 to 50)
     adj_weight=1.0,   # All weights set to 1.0 (no weighting)
     feat_weight=1.0,   # All weights set to 1.0 (no weighting)
-    prop_weight=1.0,   # All weights set to 1.0 (no weighting)
+    prop_weight=0.0,   # Property prediction disabled (set to 0.0)
     graph_weight=1.0   # All weights set to 1.0 (no weighting)
 ):
     """Main training loop."""
@@ -312,13 +315,13 @@ def train(
     print(f"  ✓ Model created")
     
     # Create optimizer with learning rate scheduling
-    # Use very conservative LR to prevent NaN
-    initial_lr = learning_rate * 0.5  # Half the base LR for stability
-    # Create scheduler that decays over total training steps (epochs * batches per epoch)
+    # Cosine decay from learning_rate to 10% of learning_rate over training
+    # This ensures LR decreases over time for stability
     total_steps = num_epochs * ((batch_size_total + batch_size - 1) // batch_size)
-    scheduler = optim.schedulers.cosine_decay(initial_lr, total_steps, end=learning_rate)
+    min_lr = learning_rate * 0.1  # Decay to 10% of initial LR
+    scheduler = optim.schedulers.cosine_decay(learning_rate, total_steps, end=min_lr)
     optimizer = optim.Adam(learning_rate=scheduler)
-    print(f"  ✓ Optimizer created (Adam, initial_lr={initial_lr:.6f}, cosine decay to {learning_rate:.6f})")
+    print(f"  ✓ Optimizer created (Adam, initial_lr={learning_rate:.6f}, cosine decay to {min_lr:.6f})")
     
     # Create loss and gradient function with balanced weights
     loss_fn = make_loss_fn(
@@ -361,7 +364,7 @@ def train(
     best_val_loss = float('inf')
     epochs_since_best = 0  # Track epochs since last improvement
     best_epoch = 0
-    min_epochs_before_stopping = 20  # Don't allow early stopping until after 20 epochs
+    min_epochs_before_stopping = 50  # Don't allow early stopping until after 50 epochs (increased for larger dataset)
     last_completed_epoch = start_epoch  # Track last completed epoch
     
     # Outer progress bar for epochs
@@ -374,17 +377,17 @@ def train(
         epoch_losses = []
         epoch_memory_samples = []
         
-        # Beta annealing for KL weight
-        # Epochs 0-2: KL weight = 0 (initial 3 epochs)
-        # Epochs 3-7: KL weight linearly increases from 0 to 25 (5 epochs, 4 intervals)
-        # Epochs 8+: KL weight = 25
-        if epoch < 3:
+        # Beta annealing for KL weight - model learns reconstruction quickly
+        # Epochs 0-4: KL weight = 0 (5 epochs for reconstruction focus)
+        # Epochs 5-29: KL weight increases by 2.0 per epoch (25 epochs: 2.0 → 50.0)
+        # Epochs 30+: KL weight = final_weight (50.0)
+        if epoch < 5:
             current_kl_weight = 0.0
-        elif epoch < 8:
-            # Linear interpolation from 0 to 25 over epochs 3-7 (4 intervals: 3->4, 4->5, 5->6, 6->7)
-            # At epoch 3: 0, at epoch 7: 25
-            current_kl_weight = ((epoch - 3) / 4.0) * kl_weight
+        elif epoch < 30:
+            # Increase by 2.0 per epoch over 25 epochs: 2.0 → 50.0
+            current_kl_weight = (epoch - 4) * 2.0
         else:
+            # Stay at final weight
             current_kl_weight = kl_weight
         
         # Learning rate is automatically updated by scheduler in optimizer
@@ -458,9 +461,18 @@ def train(
                 avg_prop = np.mean([c['property'] for c in recent_components])
                 avg_recon = np.mean([c['recon'] for c in recent_components])
                 
+                # Format KL loss for display (handle very large numbers)
+                def format_kl(kl_val):
+                    if abs(kl_val) > 1e6:
+                        return f"{kl_val:.2e}"  # Scientific notation for huge numbers
+                    elif abs(kl_val) > 1e3:
+                        return f"{kl_val:.0f}"  # No decimals for large numbers
+                    else:
+                        return f"{kl_val:.4f}"  # Normal formatting
+                
                 batch_pbar.set_postfix({
                     "loss": f"{avg_loss:.4f}",
-                    "kl": f"{avg_kl:.4f}",
+                    "kl": format_kl(avg_kl),
                     "prop": f"{avg_prop:.4f}",
                     "recon": f"{avg_recon:.4f}"
                 })
@@ -480,6 +492,15 @@ def train(
             max_memory = avg_memory
             min_memory = avg_memory
         
+        # Format KL loss for display (handle very large numbers)
+        def format_kl(kl_val):
+            if abs(kl_val) > 1e6:
+                return f"{kl_val:.2e}"  # Scientific notation for huge numbers
+            elif abs(kl_val) > 1e3:
+                return f"{kl_val:.0f}"  # No decimals for large numbers
+            else:
+                return f"{kl_val:.4f}"  # Normal formatting
+        
         # Compute average loss components for epoch
         if loss_components_list:
             avg_kl_epoch = np.mean([c['kl'] for c in loss_components_list])
@@ -493,7 +514,7 @@ def train(
         # Update epoch progress bar
         epoch_pbar.set_postfix({
             "loss": f"{avg_epoch_loss:.4f}",
-            "kl": f"{avg_kl_epoch:.4f}",
+            "kl": format_kl(avg_kl_epoch),
             "prop": f"{avg_prop_epoch:.4f}",
             "recon": f"{avg_recon_epoch:.4f}",
             "kl_w": f"{current_kl_weight:.2f}",
@@ -594,12 +615,12 @@ if __name__ == "__main__":
     parser.add_argument("--val_interval", type=int, default=3, help="Validation interval (epochs)")
     parser.add_argument("--save_interval", type=int, default=10, help="Save interval (epochs)")
     parser.add_argument("--max_grad_norm", type=float, default=5.0, help="Maximum gradient norm for clipping")
-    parser.add_argument("--early_stopping_patience", type=int, default=30, help="Early stopping patience (epochs without improvement by min_delta)")
+    parser.add_argument("--early_stopping_patience", type=int, default=50, help="Early stopping patience (epochs without improvement by min_delta)")
     parser.add_argument("--early_stopping_min_delta", type=float, default=0.0001, help="Minimum loss improvement required (accounts for scaled loss)")
-    parser.add_argument("--kl_weight", type=float, default=25.0, help="Final KL weight after annealing (annealed from 0 to this value)")
+    parser.add_argument("--kl_weight", type=float, default=50.0, help="Final KL weight after annealing (annealed from 0 to this value)")
     parser.add_argument("--adj_weight", type=float, default=1.0, help="Weight for adjacency loss")
     parser.add_argument("--feat_weight", type=float, default=1.0, help="Weight for node feature loss")
-    parser.add_argument("--prop_weight", type=float, default=1.0, help="Weight for property prediction loss")
+    parser.add_argument("--prop_weight", type=float, default=0.0, help="Weight for property prediction loss (0.0 to disable)")
     parser.add_argument("--graph_weight", type=float, default=1.0, help="Weight for gradient penalty loss")
     
     args = parser.parse_args()
