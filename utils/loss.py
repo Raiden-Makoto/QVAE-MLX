@@ -16,13 +16,20 @@ def categorical_crossentropy(y_true, y_pred, axis=None):
     """
     # Add small epsilon to avoid log(0)
     epsilon = 1e-8
-    y_pred = mx.clip(y_pred, epsilon, 1.0 - epsilon)
-    
     # Categorical crossentropy: -sum(y_true * log(y_pred))
+    # Add small epsilon to prevent log(0) = -inf
+    eps = 1e-8
+    # Use y_pred directly without clipping
+    y_pred_safe = y_pred
+    # Normalize to ensure it sums to 1 (softmax-like behavior)
+    if axis is not None:
+        y_pred_safe = y_pred_safe / (mx.sum(y_pred_safe, axis=axis, keepdims=True) + eps)
     if axis is None:
-        loss = -mx.sum(y_true * mx.log(y_pred))
+        loss = -mx.sum(y_true * mx.log(y_pred_safe + eps))
     else:
-        loss = -mx.sum(y_true * mx.log(y_pred), axis=axis)
+        loss = -mx.sum(y_true * mx.log(y_pred_safe + eps), axis=axis)
+    # Ensure loss is finite
+    loss = mx.where(mx.isfinite(loss), loss, mx.zeros_like(loss))
     return loss
 
 
@@ -54,8 +61,10 @@ def compute_loss(
     
     # Adjacency loss: categorical crossentropy
     # Normalize by number of atoms to make it more comparable
+    # Ensure inputs are finite
+    adjacency_gen_safe = mx.where(mx.isfinite(adjacency_gen), adjacency_gen, mx.zeros_like(adjacency_gen))
     adjacency_loss_per_sample = categorical_crossentropy(
-        adjacency_real, adjacency_gen, axis=1
+        adjacency_real, adjacency_gen_safe, axis=1
     )  # (batch, num_atoms, num_atoms)
     adjacency_loss_summed = mx.sum(adjacency_loss_per_sample, axis=1)  # (batch, num_atoms)
     adjacency_loss_summed = mx.sum(adjacency_loss_summed, axis=1)  # (batch,)
@@ -67,8 +76,10 @@ def compute_loss(
     adjacency_loss = mx.where(mx.isfinite(adjacency_loss), adjacency_loss, mx.zeros_like(adjacency_loss))
     
     # Features loss: categorical crossentropy
+    # Ensure inputs are finite
+    features_gen_safe = mx.where(mx.isfinite(features_gen), features_gen, mx.zeros_like(features_gen))
     features_loss_per_sample = categorical_crossentropy(
-        features_real, features_gen, axis=2
+        features_real, features_gen_safe, axis=2
     )  # (batch, num_atoms)
     # Avoid division by zero
     norm_factor = mx.maximum(num_atoms, 1.0)
@@ -77,22 +88,23 @@ def compute_loss(
     features_loss = mx.where(mx.isfinite(features_loss), features_loss, mx.zeros_like(features_loss))
     
     # KL divergence loss: -0.5 * sum(1 + logvar - mu^2 - exp(logvar))
-    # Clip logvar to prevent exp explosion
-    logvar_clipped = mx.clip(z_logvar, -10, 10)  # Prevent exp overflow
     kl_loss = -0.5 * mx.sum(
-        1 + logvar_clipped - z_mean**2 - mx.exp(logvar_clipped),
+        1 + z_logvar - z_mean**2 - mx.exp(z_logvar),
         axis=1
     )
     kl_loss = mx.mean(kl_loss)
-    # Ensure KL loss is finite
+    # Ensure finite
     kl_loss = mx.where(mx.isfinite(kl_loss), kl_loss, mx.zeros_like(kl_loss))
     
     # Property loss: binary crossentropy
+    # qed_pred is now probabilities [0, 1] after sigmoid in VAE
     qed_pred_squeezed = mx.squeeze(qed_pred, axis=1)  # (batch,)
-    # Clip predictions to prevent NaN in binary crossentropy
-    qed_pred_clipped = mx.clip(qed_pred_squeezed, -10, 10)  # Reasonable range
+    # Add small epsilon for numerical stability in log
+    epsilon = 1e-8
+    # Binary crossentropy with probabilities: -[y*log(p) + (1-y)*log(1-p)]
     property_loss = mx.mean(
-        nn.losses.binary_cross_entropy(qed_pred_clipped, qed_true)
+        -(qed_true * mx.log(qed_pred_squeezed + epsilon) + 
+          (1.0 - qed_true) * mx.log(1.0 - qed_pred_squeezed + epsilon))
     )
     # Ensure finite
     property_loss = mx.where(mx.isfinite(property_loss), property_loss, mx.zeros_like(property_loss))
@@ -111,14 +123,8 @@ def compute_loss(
         feat_weight * features_loss
     )
     
-    # Final check: ensure loss is finite
-    # If loss is NaN/Inf, return a large but reasonable value and log a warning
-    # This prevents training from crashing but indicates a problem
-    total_loss = mx.where(
-        mx.isfinite(total_loss), 
-        total_loss, 
-        mx.array(100.0)  # Reasonable fallback - indicates NaN/Inf issue
-    )
+    # Final safety check - if total is NaN/Inf, return a large but finite value
+    total_loss = mx.where(mx.isfinite(total_loss), total_loss, mx.array(1000.0))
     
     return total_loss
 

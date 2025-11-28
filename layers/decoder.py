@@ -17,6 +17,10 @@ class Decoder(nn.Module):
         input_dim = latent_dim
         for units in dense_units:
             layer = nn.Linear(input_dim, units)
+            # Better initialization: Xavier/Glorot for decoder layers
+            if hasattr(layer, 'weight'):
+                init_fn = nn.init.glorot_normal()
+                layer.weight = init_fn(layer.weight)
             self.dense_layers.append(layer)
             input_dim = units
         
@@ -27,6 +31,14 @@ class Decoder(nn.Module):
         self.adj_proj = nn.Linear(input_dim, adj_flat_size)
         self.feature_proj = nn.Linear(input_dim, feat_flat_size)
         
+        # Initialize projection layers with smaller variance
+        if hasattr(self.adj_proj, 'weight'):
+            init_fn = nn.init.glorot_normal()
+            self.adj_proj.weight = init_fn(self.adj_proj.weight)
+        if hasattr(self.feature_proj, 'weight'):
+            init_fn = nn.init.glorot_normal()
+            self.feature_proj.weight = init_fn(self.feature_proj.weight)
+        
         self.dropout_rate = dropout_rate
         self.adj_shape = adjacency_shape
         self.feature_shape = feature_shape
@@ -34,9 +46,10 @@ class Decoder(nn.Module):
     def __call__(self, inputs):
         x = inputs  # (batch, latent_dim)
         
-        # Dense layers
+        # Dense layers with activations
         for layer in self.dense_layers:
             x = layer(x)
+            x = nn.tanh(x)
             x = nn.Dropout(self.dropout_rate)(x)
         
         # Project to adjacency and features

@@ -44,12 +44,33 @@ class Encoder(nn.Module):
         input_dim = quantum_output_dim
         for units in dense_units:
             layer = nn.Linear(input_dim, units)
+            # Better initialization: Xavier/Glorot for encoder dense layers
+            if hasattr(layer, 'weight'):
+                init_fn = nn.init.glorot_normal()
+                layer.weight = init_fn(layer.weight)
             self.dense_layers.append(layer)
             input_dim = units
         
         self.dropout_rate = dropout_rate
         self.fc_mu = nn.Linear(input_dim, latent_dim)
         self.fc_logvar = nn.Linear(input_dim, latent_dim)
+        
+        # Kaiming/He initialization for VAE latent layers
+        # fc_mu: Use He normal initialization to prevent zero outputs
+        if hasattr(self.fc_mu, 'weight'):
+            init_fn = nn.init.he_normal()
+            self.fc_mu.weight = init_fn(self.fc_mu.weight)
+        if hasattr(self.fc_mu, 'bias') and self.fc_mu.bias is not None:
+            # Zero bias for mu (prior mean is 0)
+            self.fc_mu.bias = mx.zeros_like(self.fc_mu.bias)
+        
+        # fc_logvar: Use He normal initialization
+        if hasattr(self.fc_logvar, 'weight'):
+            init_fn = nn.init.he_normal()
+            self.fc_logvar.weight = init_fn(self.fc_logvar.weight)
+        if hasattr(self.fc_logvar, 'bias') and self.fc_logvar.bias is not None:
+            # Initialize logvar bias to 2 (variance = exp(2) ≈ 7.39, higher initial variance)
+            self.fc_logvar.bias = mx.array([2.0] * latent_dim, dtype=mx.float32)
         
     def __call__(self, inputs):
         adjacency, features = inputs
@@ -86,17 +107,19 @@ class Encoder(nn.Module):
         # Concatenate all sub-batches: (batch, num_atoms, last_units)
         features_transformed = mx.concatenate(features_transformed_list, axis=0)
         
-        # Pool over num_atoms dimension: average over atoms
+        # Pool over num_atoms dimension using the pooling layer
         # features_transformed: (batch, num_atoms, last_gconv_units)
-        # After pooling we have (batch, last_gconv_units), which matches QuantumDense input.
-        x = mx.mean(features_transformed, axis=1)  # (batch, last_gconv_units)
+        # AvgPool1d in MLX expects (batch, length, channels) and pools over length.
+        x = self.pool(features_transformed)  # (batch, 1, last_gconv_units)
+        x = mx.squeeze(x, axis=1)  # (batch, last_gconv_units)
         
         # QuantumDense: amplitude embedding + entangling circuit + measurement
-        x = self.q_dense(x)  # (batch, last_gconv_units)
+        #x = self.q_dense(x)  # (batch, last_gconv_units)
         
-        # Regular dense layers
+        # Regular dense layers with activations
         for layer in self.dense_layers:
             x = layer(x)
+            x = nn.relu(x)
             x = nn.Dropout(self.dropout_rate)(x)
         
         mu = self.fc_mu(x)

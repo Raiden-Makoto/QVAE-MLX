@@ -100,6 +100,7 @@ def graph_to_molecule(graph):
         for j in range(i + 1, num_atoms):
             triu_mask[i, j] = True
     
+    added_bonds = set()
     for bond_idx in range(adjacency.shape[0]):
         if bond_idx == BOND_DIM - 1:
             continue
@@ -109,11 +110,17 @@ def graph_to_molecule(graph):
         for i in range(num_atoms):
             for j in range(i + 1, num_atoms):
                 if bool(bond_exists[i, j]):
-                    bond_locations.append((i, j))
+                    bond_pair = (min(i, j), max(i, j))
+                    if bond_pair not in added_bonds:
+                        bond_locations.append((i, j))
+                        added_bonds.add(bond_pair)
         
         for atom_i, atom_j in bond_locations:
             bond_type = bond_mapping[bond_idx]
-        molecule.AddBond(int(atom_i), int(atom_j), bond_type)
+            try:
+                molecule.AddBond(int(atom_i), int(atom_j), bond_type)
+            except:
+                pass
     flag = Chem.SanitizeMol(molecule, catchErrors=True)
     if flag != Chem.SanitizeFlags.SANITIZE_NONE:
         return None

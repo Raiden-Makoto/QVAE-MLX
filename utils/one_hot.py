@@ -22,9 +22,8 @@ def one_hot(indices, depth, axis=-1):
         axis = len(shape) + axis + 1
     shape.insert(axis, depth)
     
-    # Convert to numpy for indexing and clamp
+    # Convert to numpy for indexing
     indices_np = np.array(indices)
-    indices_np = np.clip(indices_np, 0, depth - 1)  # Clamp in numpy
     output_np = np.zeros(shape, dtype=np.float32)
     
     if indices.ndim == 2:

@@ -22,7 +22,8 @@ class VAE(nn.Module):
         mu, logvar = self.encoder(inputs)
         z = self.reparameterize(mu, logvar)
         adjacency, features = self.decoder(z)
-        property = self.property(mu)
+        property_logits = self.property(mu)
+        property = nn.sigmoid(property_logits)  # Apply sigmoid to get [0, 1] range
         return mu, logvar, adjacency, features, property
 
     def inference(self, batch_size):
